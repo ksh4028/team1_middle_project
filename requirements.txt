@@ -1,0 +1,5 @@
+# 제안요청서 요약 - JupyterLab용
+openai>=1.0.0
+python-docx>=1.0.0
+PyPDF2>=3.0.0
+python-dotenv>=1.0.0
