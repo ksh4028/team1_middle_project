@@ -1,0 +1,6 @@
+conda create -n middle310 python=3.10.19 -y
+
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+
+conda activate middle310
