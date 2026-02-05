@@ -4,6 +4,7 @@ import olefile
 import zlib
 import unicodedata
 import struct
+import pickle
 from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -28,6 +29,25 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline, HuggingFaceEmbeddings
 from langchain_core.messages import HumanMessage
 
+# LangChain - Core
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+
+# LangChain - Document Loaders
+from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader
+
+# LangChain - Vector Stores & Embeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.docstore.in_memory import InMemoryDocstore
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline, HuggingFaceEmbeddings
+import numpy as np
+import faiss
+# Transformers
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
+
 # 환경 변수
 from dotenv import load_dotenv
 
@@ -36,7 +56,6 @@ DATA_DIR =  os.path.join(BASE_DIR, "data")
 # .env 파일 로드
 ENV_FILE = os.path.join(BASE_DIR, ".env")
 
-# 사용 예시
 CSV_PATH = os.path.join(DATA_DIR,"rfp_files", "data_list.csv")
 RFP_DATA_DIR = os.path.join(DATA_DIR, "rfp_files","files")
 MY_FILE_VER = f"midprj_01"
@@ -47,24 +66,19 @@ SQLITEDB_PATH = os.path.join(SQLITEDB_DIR, f"{MY_FILE_VER}.db")
 
 LOG_DIR = os.path.join(DATA_DIR, "log")
 LOG_FILE = os.path.join(LOG_DIR, f"{MY_FILE_VER}.txt")
-IS_GPU = None
+IS_GPU = torch.cuda.is_available()
 
-if "cuda" in torch.device("cuda").type:
-    IS_GPU = True
+STORE_VER = "V05"
 
-def init_env():
+def init_Env():
     print("환경 변수 초기화 및 디렉토리 생성")
     load_dotenv(ENV_FILE)
     if not os.path.exists(SQLITEDB_DIR):
         os.makedirs(SQLITEDB_DIR)
     if not os.path.exists(LOG_DIR):
         os.makedirs(LOG_DIR)
-    if "cuda" in torch.device("cuda").type:
-        IS_GPU = True
-    else:
-        IS_GPU = False
 
-init_env()
+init_Env()
 
 
 # ════════════════════════════════════════
@@ -83,9 +97,9 @@ def Lines(text=None, count=100):
 
 
 ## 로그 함수
-def OpLog(log):
-    msg = f"[[{now_str()}] {log}]"
-    print(msg,end="\r")
+def OpLog(log,bLines = False):
+    if bLines:
+        Lines(log)
     try:
         frame = sys._getframe(1)
         caller_name = frame.f_code.co_name
@@ -120,6 +134,9 @@ class PARAMVAR:
     is_gpu:bool = IS_GPU
     csv_path:str =  CSV_PATH
     rfp_data_dir:str = RFP_DATA_DIR
+    k : int = 5
+    is_openai : bool = True
+    newCreate : bool = False
 
 
 # ════════════════════════════════════════
@@ -219,6 +236,16 @@ class SQLiteDB:
         self._close()
         return rows
 
+    ## 데이터베이스 초기화 (테이블 삭제 후 재생성)
+    def clear_db(self):
+        OpLog("데이터베이스 초기화 시작")
+        self.execute('DROP TABLE IF EXISTS blob_data')
+        self.execute('DROP TABLE IF EXISTS result_data')
+        self.execute('DROP TABLE IF EXISTS rfp_metadata')
+        self.create_table()
+        OpLog("데이터베이스 초기화 완료")
+
+    ## BLOB 데이터 청크 단위 저장 
     def save_blob(self, blob_name: str, blob_content: bytes):
         OpLog(f"Blob 저장 시작: {blob_name} (크기: {len(blob_content) / (1024**3):.2f} GB)")
         
@@ -248,6 +275,7 @@ class SQLiteDB:
         self._close()
         OpLog(f"Blob 저장 완료: {blob_name} ({len(chunks)}개 청크)")
     
+    ## BLOB 데이터 청크 단위 로드 및 병합
     def load_blob(self, blob_name: str) -> bytes:
         OpLog(f"Blob 로드 시작: {blob_name}")
         self._connect()
@@ -275,6 +303,7 @@ class SQLiteDB:
             OpLog(f"Blob 없음: {blob_name}")
             return None
     
+    ## 결과 데이터 로드
     def load_results(self, execute_index:int)-> bool:
         sql = '''
             SELECT * FROM result_data 
@@ -287,6 +316,7 @@ class SQLiteDB:
         else:
             return False 
     
+    ## 결과 데이터 저장
     def save_results(self, execute_index:int, model_item:str, embedding_model:str, llm_model:str, temperature:float, repetition_penalty:float, query_index:int, query:str, answer:str, start_time:str, end_time:str):
         sql = '''
             INSERT OR REPLACE INTO result_data 
@@ -302,6 +332,7 @@ class SQLiteDB:
         Lines(f"Result 저장 완료: execute_index={execute_index}, query_index={query_index}, model_item={model_item}, embedding_model={embedding_model}, llm_model={llm_model}\ntemperature={temperature}, repetition_penalty={repetition_penalty}\nonlocal query={query}\nanswer={answer}\nstart_time={start_time}, end_time={end_time}")
         OpLog(f"Result 저장 완료: execute_index={execute_index}, query_index={query_index}")
      
+    ## 메타데이터 저장
     def save_metadata(self, metadata:pd.DataFrame):
         sql = "DELETE FROM rfp_metadata"
         self.execute(sql)
@@ -330,6 +361,8 @@ class SQLiteDB:
         self.connection.commit()
         self._close()
         OpLog(f"메타데이터 저장 완료: {len(metadata)}개 레코드")
+    
+    ## 메타데이터 로드
     def load_metadata(self)-> pd.DataFrame:
         sql = '''
             SELECT * FROM rfp_metadata
@@ -347,18 +380,26 @@ class BidMatePreprocessor:
     ## 생성자
     def __init__(self, param:PARAMVAR):
         self.param = param
-        self.metadata_df = None
         self.data_dir = Path(self.param.rfp_data_dir)
         #self.normalize_filenames(self.param.rfp_data_dir)
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=param.chunk_size,
             chunk_overlap=param.chunk_overlap
         )
-        self.embeddings = OpenAIEmbeddings(
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-            model=param.embedding_model
-        )
+        self.embeddings = None
+        if  param.is_openai:
+            self.embeddings = OpenAIEmbeddings(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                model=param.embedding_model
+            )
+        else:
+            self.embeddings = HuggingFaceEmbeddings(
+            model_name=param.embedding_model)
+            
         self.vector_store = None
+        # 메타데이터 로드
+        self.metadata_df = pd.read_csv(self.param.csv_path)
+        OpLog(f"메타데이터 로드 완료: {len(self.metadata_df)}개 레코드", True)
 
 
     ## 파일 탐색기에서 한글 파일명이 깨져 보이는(자음/모음 분리) 현상은 주로 MacOS에서 압축된 파일을 Windows에서 풀었을 때 발생하는
@@ -501,28 +542,8 @@ class BidMatePreprocessor:
         self.metadata_df = pd.read_csv(self.param.csv_path)
         db.save_metadata(self.metadata_df)
 
-    def process_and_save(self,newCreate:bool = False):
-        db = SQLiteDB() 
-        faiss_name = f"faiss_index_{self.param.embedding_model}_cs_{self.param.chunk_size}_co_{self.param.chunk_overlap}"
-        if not newCreate:
-            blob_bytes = db.load_blob(faiss_name)
-            if blob_bytes:
-                try:
-                    self.vector_store = FAISS.deserialize_from_bytes(
-                        blob_bytes,
-                        self.embeddings,
-                        allow_dangerous_deserialization=True,
-                    )
-                    print(f"✅ 기존 Vector DB 로드 완료: {faiss_name}")
-                    return self.vector_store
-                except Exception as e:
-                    print(f"⚠️ Vector DB 역직렬화 실패: {e}")
-            else:
-                print(f"⚠️ 기존 Vector DB 없음: {faiss_name}")
-        else :
-            print(f"⚠️ 새로 생성: {faiss_name}")
+    def get_all_docs(self):
         all_docs = []
-       
         for _, row in self.metadata_df.iterrows():
             file_name = unicodedata.normalize('NFC', row['파일명'])
             file_path = os.path.join(self.param.rfp_data_dir, file_name)
@@ -564,38 +585,128 @@ class BidMatePreprocessor:
                     
                 }
             )
-            print(doc.metadata)
+            Lines(doc.metadata)
             
             # 3. 청킹 적용
             splits = self.text_splitter.split_documents([doc])
             all_docs.extend(splits)
+        return all_docs
 
+
+
+    ## FAISS 이름 생성
+    def make_faiss_name(self):
+        vector_name = f"{self.param.embedding_model.replace('/', '_')}_{self.param.llm_model.replace('/', '')}"
+        faiss_name = f"faiss_store_{vector_name}_cs_{self.param.chunk_size}_co_{self.param.chunk_overlap}_{STORE_VER}"
+        return faiss_name
+
+    ## 기존 벡터 스토어 확인 및 로드
+    def _check_vector_store_exists(self, newCreate):
+        vector_store = None
+        faiss_name = self.make_faiss_name()
+        if not newCreate:
+            db = SQLiteDB()
+            blob_bytes = db.load_blob(faiss_name)
+            if blob_bytes:
+                try:
+                    vector_store = FAISS.deserialize_from_bytes(
+                        blob_bytes,
+                        self.embeddings,
+                        allow_dangerous_deserialization=True,
+                    )
+                    print(f"✅ 기존 Vector DB 로드 완료: {faiss_name}")
+                except Exception as e:
+                    print(f"⚠️ Vector DB 역직렬화 실패: {e}")
+            else:
+                print(f"⚠️ 기존 Vector DB 없음: {faiss_name}")
+        return vector_store
+
+    def get_hugging_vector_store(self,newCreate:bool = False):
+        db = SQLiteDB() 
+        vector_store = self._check_vector_store_exists(newCreate)
+        if not vector_store is None:
+            return vector_store
+        faiss_name = self.make_faiss_name()
+        if not newCreate:
+            blob_bytes = db.load_blob(faiss_name)
+            if blob_bytes:
+                try:
+                    self.vector_store = FAISS.deserialize_from_bytes(
+                        blob_bytes,
+                        self.embeddings,
+                        allow_dangerous_deserialization=True,
+                    )
+                    print(f"✅ 기존 Vector DB 로드 완료: {faiss_name}")
+                    return self.vector_store
+                except Exception as e:
+                    print(f"⚠️ Vector DB 역직렬화 실패: {e}")
+            else:
+                print(f"⚠️ 기존 Vector DB 없음: {faiss_name}")
+        else :
+            print(f"⚠️ 새로 생성: {faiss_name}")
+                  
+        all_docs = self.get_all_docs()
+        embedding_dim = len(self.embeddings.embed_query("hello world"))
+        # 코사인 유사도: 벡터 정규화 + IndexFlatIP
+        index = faiss.IndexFlatIP(embedding_dim)
+        texts = [doc.page_content for doc in all_docs]
+        vectors = [self.embeddings.embed_query(text) for text in texts]
+        vectors = np.array(vectors, dtype=np.float32)
+        if vectors.ndim == 1:
+            vectors = vectors.reshape(1, -1)
+        # L2 정규화
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        vectors = vectors / (norms + 1e-10)
+        docstore_dict = {str(i): doc for i, doc in enumerate(all_docs)}
+        index_to_docstore_id = {i: str(i) for i in range(len(all_docs))}
+        self._vector_store = FAISS(
+            embedding_function=self.embeddings,
+            index=index,
+            docstore=InMemoryDocstore(docstore_dict),
+            index_to_docstore_id=index_to_docstore_id,
+        )
+        self._vector_store.index.add(vectors)
+         # 4. Vector DB 생성 및 저장 (Scenario B: OpenAI 기반)
+        print(f"🚀 총 {len(all_docs)}개 청크를 벡터화하여 저장합니다...")
+        self.vector_store = FAISS.from_documents(all_docs, self.embeddings)
+        blob_bytes = self.vector_store.serialize_to_bytes()
+        db = SQLiteDB() 
+        db.save_blob(faiss_name, blob_bytes)
+        return self.vector_store
+
+
+  
+    def get_openai_vector_store(self,newCreate):
+        faiss_name = self.make_faiss_name()
+        vector_store = self._check_vector_store_exists(newCreate)
+        if not vector_store is None:
+            return vector_store
+        db = SQLiteDB() 
+        all_docs = self.get_all_docs()
+        
         # 4. Vector DB 생성 및 저장 (Scenario B: OpenAI 기반)
         print(f"🚀 총 {len(all_docs)}개 청크를 벡터화하여 저장합니다...")
         self.vector_store = FAISS.from_documents(all_docs, self.embeddings)
         self.vector_store.save_local(faiss_name)
         blob_bytes = self.vector_store.serialize_to_bytes()
+        db = SQLiteDB() 
         db.save_blob(faiss_name, blob_bytes)
         return self.vector_store
+   
 
-# param = PARAMVAR()
-# param.embedding_model = "text-embedding-3-small"
-# param.chunk_size = 1000
-# param.chunk_overlap = 100
-
-# processor = BidMatePreprocessor(
-#     param
-# )
-# vector_db = processor.process_and_save(True)
-
-
+    def get_vector_store(self,newCreatl):
+        if self.param.is_openai:
+            return self.get_openai_vector_store(newCreatl)
+        else:
+            return self.get_openai_vector_store(newCreatl)
+            
 
 # ════════════════════════════════════════
 # ▣ 베이스 모델 클래스 
 # ════════════════════════════════════════
 class BaseModel():
     def __init__(self,param:PARAMVAR):
-        self._my_name = "BseModel"
+        self._my_name = f"embedding:{param.embedding_model}_llm:{param.llm_model}"
         self._param = param
         self._vector_store = None
         self._llm = None
@@ -624,10 +735,9 @@ class BaseModel():
 class OpenAIModel(BaseModel):
     def __init__(self,param:PARAMVAR):
         super().__init__(param)
-        self._my_name = "OpenAIModel"
         Lines(f"Make Model :: My_name:{self._my_name}, embedding_model:{self._param.embedding_model},llm_model:{self._param.llm_model},chunk_size:{self._param.chunk_size},chunk_overlap:{self._param.chunk_overlap},temperature:{self._param.temperature},repetition_penalty:{self._param.repetition_penalty}")
-        processor = BidMatePreprocessor(param)
-        self._vector_store = processor.process_and_save(newCreate=False)
+        processor = BidMatePreprocessor(self._param)
+        self._vector_store = processor.get_vector_store(self._param.newCreate)
 
     def make_model(self):
         OpLog(f"OpenAI LLM 생성 시작: {self._param.llm_model}")
@@ -637,45 +747,189 @@ class OpenAIModel(BaseModel):
         
     def rag_search(self, question):
         # 질문을 벡터로 변환하여 유사한 문서를 검색
-        results = self._vector_store.similarity_search(question, k=3)
+        results = self._vector_store.similarity_search(question, k=self._param.k)
         # 검색된 문서의 내용을 텍스트로 결합
-        context = "\n".join([r.page_content for r in results])
+        context = "\n---\n".join([r.page_content for r in results])
         # LLM에게 질문과 관련된 문서 내용을 함께 전달하여 응답 생성
-        response = self._llm.invoke([HumanMessage(content=f"Context: {context}\nQuestion: {question}")])
-        
+        prompt = f"""다음 메타데이터와 문서 내용을 참고하여 질문에 답변해주세요.
+
+Context: 
+{context}
+
+Question: {question}
+
+Answer:"""
+        response = self._llm.invoke([HumanMessage(content=prompt)])
         return response.content
 
-# def Execute_Model(param:PARAMVAR, query:str)-> str:
-#     model = OpenAIModel(param)
-#     model.make_model()
-#     answer = model.rag_search(query)
-#     print(answer)
-#     return answer       
-   
-# param = PARAMVAR()
-# param.embedding_model = "text-embedding-3-small"
-# param.chunk_size = 1000
-# param.chunk_overlap = 100
-# param.temperature = 0.7
-# param.repetition_penalty = 1.2
-# param.llm_model = "gpt-5-mini"
 
-#Execute_Model(param, "고려대학교에서 나온 RFP 는?")
 
-if __name__ == "__main__":
+class HugginFaceModel(BaseModel):
+    def __init__(self,param:PARAMVAR):
+        super().__init__(param)
+        param.is_openai = False
+        Lines(f"Make Model :: My_name:{self._my_name}, embedding_model:{self._param.embedding_model},llm_model:{self._param.llm_model},chunk_size:{self._param.chunk_size},chunk_overlap:{self._param.chunk_overlap},temperature:{self._param.temperature},repetition_penalty:{self._param.repetition_penalty}")
+        processor = BidMatePreprocessor(param)
+        self._vector_store = processor.get_vector_store(self._param.newCreate)
+    
+    def make_model(self):
+        Lines(f"Make Model :: embedding_model_name:{self._param.embedding_model},llm_model:{self._param.llm_model},model_name:{self._my_name},temperature:{self._param.temperature},repetition_penalty:{self._param.repetition_penalty}")
+        from transformers import AutoModelForCausalLM, AutoTokenizer        
+        retriever = self._vector_store.as_retriever()
+        if self._param.is_gpu:
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                llm_int8_enable_fp32_cpu_offload=True,
+            )
+        else:
+            bnb_config = None
+        device_map = "auto"
+        if( self._param.is_gpu):
+            device_map = "auto"
+        else:
+            device_map = None
+
+        Lines("Make AutoModelForCausalLM")
+        OpLog(f"AutoModelForCausalLM 로드 시작: {self._param.llm_model}")
+        model = AutoModelForCausalLM.from_pretrained(
+            self._param.llm_model,
+            quantization_config= bnb_config if self._param.is_gpu else None,
+            device_map=device_map,
+            trust_remote_code=True,
+        )
+        OpLog(f"AutoModelForCausalLM 로드 완료")
+        OpLog(f"Tokenizer 로드 시작: {self._param.llm_model}")
+        tokenizer = AutoTokenizer.from_pretrained(self._param.llm_model)
+        OpLog(f"Tokenizer 로드 완료")
+        from transformers import pipeline
+        Lines("Make LLM pipeline")
+        OpLog(f"LLM Pipeline 생성 시작")
+        llm_pipeline = pipeline(
+            model=model,
+            tokenizer=tokenizer,
+            task="text-generation",
+            do_sample=True,
+            temperature=self._param.temperature,
+            repetition_penalty=self._param.repetition_penalty,
+            return_full_text=False,
+            max_new_tokens=1000,
+        )
+        llm = HuggingFacePipeline(pipeline=llm_pipeline)
+        chat_model = ChatHuggingFace(llm=llm)
+        template = """다음 메타데이터와 문서 내용을 참고하여 질문에 답변해주세요.
+        Context:
+        {context}
+        Question:
+        {question}
+        """
+        prompt = PromptTemplate.from_template(template)
+
+        from langchain_core.runnables import RunnablePassthrough
+        from langchain_core.output_parsers import StrOutputParser
+
+        def format_docs(docs):
+            print(docs)
+            return "\n\n".join(doc.page_content for doc in docs)
+
+        self._retrieval_chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+        OpLog(f"Retrieval Chain 생성 완료")
+    
+    def rag_search(self, question):
+        # LLM에서 최종 답변 가져오기
+        answer = self._retrieval_chain.invoke(question)
+        return answer
+
+def Execute_Model(is_openai: bool, chunk_size: int, chunk_overlap: int, temperature: float, repetition_penalty: float, newCreate: bool, k: int, 
+                  embedding_model: str , llm_model: str):
     param = PARAMVAR()
-    param.embedding_model = "text-embedding-3-small"
-    param.chunk_size = 1000
-    param.chunk_overlap = 100
-    param.temperature = 0.7
-    param.repetition_penalty = 1.2
-    param.llm_model = "gpt-5-mini"
-    model = OpenAIModel(param)
+    param.is_openai = is_openai
+    param.chunk_size =  chunk_size
+    param.chunk_overlap = chunk_overlap
+    param.temperature = temperature
+    param.repetition_penalty = repetition_penalty
+    param.newCreate = newCreate
+    param.k = k
+    model = None
+    if( param.is_openai):
+        param.embedding_model = embedding_model
+        param.llm_model = llm_model
+        model = OpenAIModel(param)
+    else:
+        param.embedding_model = embedding_model
+        param.llm_model = llm_model
+        model = HugginFaceModel(param)
     model.make_model()
     ## 테스트 질의를 입력 받는다. 
     ## ctrl+c 로 종료
     while True: 
         query = input("질문을 입력하세요 (종료하려면 Ctrl+C): ")
         answer = model.rag_search(query)
-        print(f"답변: {answer}\n")
-        
+        print("답변:")
+        Lines(answer)
+
+def Execute_ModelEx(is_openai: bool, chunk_size: int, chunk_overlap: int, temperature: float, repetition_penalty: float, newCreate: bool, k: int, 
+                  embedding_model: str , llm_model: str):
+    param = PARAMVAR()
+    param.is_openai = is_openai
+    param.chunk_size =  chunk_size
+    param.chunk_overlap = chunk_overlap
+    param.temperature = temperature
+    param.repetition_penalty = repetition_penalty
+    param.newCreate = newCreate
+    param.k = k
+    model = None
+    if( param.is_openai):
+        param.embedding_model = embedding_model
+        param.llm_model = llm_model
+        model = OpenAIModel(param)
+    else:
+        param.embedding_model = embedding_model
+        param.llm_model = llm_model
+        model = HugginFaceModel(param)
+    model.make_model()
+    ## 테스트 질의를 입력 받는다. 
+    ## ctrl+c 로 종료
+    while True: 
+        query = input("질문을 입력하세요 (종료하려면 Ctrl+C): ")
+        answer = model.rag_search(query)
+        print("답변:")
+        Lines(answer)
+
+
+#text-embedding-3-small" gpt-5-mini"
+#nlpai-lab/KoE5 --llm_model nlpai-lab/KULLM3
+
+if __name__ == "__main__":
+    param = PARAMVAR()
+    param.is_openai = False 
+    param.chunk_size = 1000
+    param.chunk_overlap = 100
+    param.temperature = 0.7
+    param.repetition_penalty = 1.2
+    param.newCreate = False 
+    param.k = 5
+    model = None
+    if( param.is_openai):
+        param.embedding_model = "text-embedding-3-small"
+        param.llm_model = "gpt-5-mini"
+        model = OpenAIModel(param)
+    else:
+        param.embedding_model ="BAAI/bge-m3" # "nlpai-lab/KoE5"
+        param.llm_model = "nlpai-lab/KULLM3"
+        model = HugginFaceModel(param)
+    model.make_model()
+    ## 테스트 질의를 입력 받는다. 
+    ## ctrl+c 로 종료
+    while True: 
+        query = input("질문을 입력하세요 (종료하려면 Ctrl+C): ")
+        answer = model.rag_search(query)
+        print("답변:")
+        Lines(answer)
