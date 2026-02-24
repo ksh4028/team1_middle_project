@@ -1,0 +1,43 @@
+[현재 ollama 서비스 현황]
+address     =  http://34.45.125.252:11434/
+model_name = exaone3.5:7.8b
+embedding_model_name = bge-m3
+
+[optimized_parameters]
+CHUNK_SIZE = 500  
+CHUNK_OVERLAP = 50  
+RETRIEVER_K = 10  
+USE_HYBRID = true  
+HYBRID_ALPHA = 0.5   # BM25 50% + Vector 50%  
+
+ ollama run LGAI-EXAONE/exaone-embedding-3.5-2.4b
+
+
+temperature 0.2 --repetition_penalty 1.2
+temperature 0.3 --repetition_penalty 1.1
+temperature 0.3 --repetition_penalty 1.0
+
+ebeddings_llm = {["openai","text-embedding-3-small","gpt-5-mini"],["ollama","bge-m3","exaone3.5:7.8b"],["huggingface","nlpai-lab/KoE5","nlpai-lab/KULLM3"]}
+temp_penalty = {[0.2,1.2],[0.3,1.1],[0.3,1.0]}
+chunk_size_overlap = {[500,50],[700,70],[1000,100]}
+k = {5,7,10}
+reranker_types = {"openai","flashrank","base"}
+
+
+
+model_name = exaone3.5:7.8b
+embedding_model_name = bge-m3
+
+
+ param.retriever_type = "hybrid"
+    model_item = _normalize_model_item(param.whatmodelItem)
+    if model_item == "openai":
+        param.embedding_model = "text-embedding-3-small"
+        param.llm_model = "gpt-5-mini"
+    elif model_item == "ollama":
+        param.embedding_model = param.ollama_embedding_model_name
+        param.llm_model = param.ollama_model_name
+    else:
+        param.embedding_model ="nlpai-lab/KoE5" # "BAAI/bge-m3"
+        param.llm_model = "nlpai-lab/KULLM3"
+    Execute_Model(
