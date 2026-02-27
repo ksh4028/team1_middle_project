@@ -2,6 +2,19 @@
 
 기업 및 정부 제안요청서 내용을 NLP/LLM을 활용하여 요약하는 서비스입니다.
 
+
+# 프로젝트 보고서 파일_pdf
+- [보고서 링크](https://drive.google.com/file/d/1-dbVTZjySRsYocZlwwwsaywrQGd1PWhU/view?usp=drive_link)
+  
+# 개인 로그
+-
+-
+-
+-
+-
+-
+
+
 ## 프로젝트 개요
 
 - **프로젝트명**: 자연어처리 모델 프로젝트
