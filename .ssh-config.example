@@ -1,0 +1,5 @@
+
+Host gcp-vm
+    HostName 34.45.125.252
+    User codeit
+    Port 22
