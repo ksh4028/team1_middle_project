@@ -133,10 +133,101 @@ def compare_rag_performance(db_path, execute_indices):
     print("\n[ 상세 성능 리포트 ]")
     print(df[['execute_index', 'model_item', 'pipeline', 'total_score_pct', 'faith', 'rel', 'ctx']].to_string(index=False))
 
+# ════════════════════════════════════════
+# ▣ 답변 시간 분석
+# openai/ollama 별 답변 시간 분석 후 top3 비교(질문-응답 사간 평균 비교)
+# ════════════════════════════════════════
+def analyze_reply_time_top3(db_path, target_index):
+    # 1. 데이터베이스 연결
+    conn = sqlite3.connect(db_path)
+    
+    # 2. SQL 쿼리: model_item, pipeline 구성 요소 및 시작/종료 시간 조회
+    # do_retriever가 NULL일 경우를 대비해 COALESCE 처리 (SQLite 문법)
+    query = f"""
+    SELECT 
+        model_item,
+        llm_model,
+        IFNULL(do_retriever, 'Default') || ' / ' || IFNULL(reranker_type, 'None') AS pipeline,
+        start_time,
+        end_time
+    FROM result_data
+    WHERE execute_index = {target_index}
+    """
+    
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+
+    if df.empty:
+        print("데이터가 없습니다. execute_index를 확인하세요.")
+        return
+
+    # 3. 시간 변환 및 수행 시간 계산 (초 단위)
+    df['start_dt'] = pd.to_datetime(df['start_time'])
+    df['end_dt'] = pd.to_datetime(df['end_time'])
+    df['elapsed_sec'] = (df['end_dt'] - df['start_dt']).dt.total_seconds()
+
+    # 4. 모델/파이프라인별 평균 응답 시간 계산
+    df_avg = df.groupby(['model_item', 'pipeline', 'llm_model']).agg({
+        'elapsed_sec': 'mean'
+    }).reset_index()
+
+    # 5. 모델별(OpenAI / Ollama) 상위 3개 추출
+    # 각 모델별로 그룹지어 수행시간(elapsed_sec) 기준 오름차순(빠른 순) 상위 3개 선택
+    top3_per_model = df_avg.sort_values('elapsed_sec').groupby('model_item').head(3).copy()
+
+    # 6. 시각화
+    plt.figure(figsize=(15, 8))
+    sns.set_theme(style="whitegrid")
+    
+    # 색상 맵 설정 (OpenAI vs Ollama 구분)
+    palette = {'OpenAI': '#10a37f', 'Ollama': '#f15a24'}
+    
+    # x축 라벨용 조합 이름 생성
+    top3_per_model['config_label'] = top3_per_model['pipeline'] + "\n(" + top3_per_model['llm_model'] + ")"
+
+    # 바 차트 생성
+    barplot = sns.barplot(
+        data=top3_per_model,
+        x='config_label',
+        y='elapsed_sec',
+        hue='model_item',
+        palette=palette
+    )
+
+    # 그래프 세부 설정
+    plt.title(f'Reply Time Analysis: Top 3 Fastest by Model (Index: {target_index})', fontsize=16, pad=20)
+    plt.ylabel('Average Reply Time (Seconds)', fontsize=12)
+    plt.xlabel('Pipeline & LLM Configuration', fontsize=12)
+    plt.legend(title='LLM Model Item', loc='upper right')
+    
+    # 바 위에 시간 표시
+    for p in barplot.patches:
+        height = p.get_height()
+        if height > 0:
+            barplot.annotate(f'{height:.2f}s', 
+                             (p.get_x() + p.get_width() / 2., height), 
+                             ha='center', va='center', 
+                             xytext=(0, 9), 
+                             textcoords='offset points',
+                             fontsize=10, fontweight='bold')
+
+    plt.xticks(rotation=10)
+    plt.tight_layout()
+    plt.show()
+
+    # 상세 수치 출력
+    print("\n[ 답변 시간 분석 결과: 각 모델별 상위 3개 ]")
+    print(top3_per_model[['model_item', 'llm_model', 'pipeline', 'elapsed_sec']].sort_values(['model_item', 'elapsed_sec']).to_string(index=False))
 
 # 실행
 if __name__ == "__main__":
     # 데이터베이스 파일명을 실제 파일명으로 수정하세요.
-    analyze_model_performance(r"D:\midprj0221.db", target_index=202)
-    compare_rag_performance(r"D:\midprj0221.db", execute_indices=[202])
-   
+    db_path = r"D:\midprj.db"
+    target_idx = 400
+    
+    # 1. 기존 성능 분석
+   # analyze_model_performance(db_path, target_index=target_idx)
+   # compare_rag_performance(db_path, execute_indices=[target_idx])
+    
+    # 2. 신규 답변 시간 분석
+    analyze_reply_time_top3(db_path, target_index=target_idx)
