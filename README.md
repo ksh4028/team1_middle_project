@@ -7,7 +7,7 @@
 - [보고서 링크](https://drive.google.com/file/d/1-dbVTZjySRsYocZlwwwsaywrQGd1PWhU/view?usp=drive_link)
   
 # 개인 로그
--
+- [김영욱 작업일지] https://github.com/ksh4028/team1_middle_project/blob/main/miprj/doc/%EC%A4%91%EA%B8%89%ED%94%8C%EC%A0%9D%ED%8A%B8%ED%98%91%EC%97%85%EC%9D%BC%EC%A7%80(6%ED%8C%80_%EA%B9%80%EC%98%81%EC%9A%B1).pdf
 -
 -
 -
